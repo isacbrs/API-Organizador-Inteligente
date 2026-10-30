@@ -1,6 +1,8 @@
 import json
 from openai import AsyncOpenAI
 from app.core.config import settings
+import tempfile
+import os
 
 # O cliente usa a biblioteca da OpenAI, mas aponta para os servidores da Nebius
 client = AsyncOpenAI(
@@ -47,3 +49,32 @@ async def extrair_dados_fatura(texto_usuario: str) -> dict:
     # Extrai o texto da resposta e converte para um Dicionário Python
     resultado_texto = response.choices[0].message.content
     return json.loads(resultado_texto)
+async def transcrever_e_extrair_audio(audio_bytes: bytes, formato: str) -> dict:
+    """
+    Recebe os bytes do áudio, guarda temporariamente, envia para a IA transcrever (Whisper)
+    e depois envia o texto transcrito para o motor de extração de dados.
+    """
+    # Cria um ficheiro temporário seguro para o áudio
+    fd, temp_path = tempfile.mkstemp(suffix=f".{formato}")
+    try:
+        # Escreve os bytes no ficheiro físico temporário
+        with os.fdopen(fd, 'wb') as f:
+            f.write(audio_bytes)
+        
+        # Envia para o modelo de Speech-to-Text (Whisper)
+        with open(temp_path, "rb") as audio_file:
+            transcricao = await client.audio.transcriptions.create(
+                model="whisper-1", # Modelo padrão da indústria para áudio
+                file=audio_file
+            )
+        
+        texto_extraido = transcricao.text
+        
+        # Reaproveita a função que criámos na Feature 2.1 para processar o texto
+        dados_fatura = await extrair_dados_fatura(texto_extraido)
+        return dados_fatura
+        
+    finally:
+        # Limpeza obrigatória: apaga o ficheiro temporário para não lotar o servidor
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
