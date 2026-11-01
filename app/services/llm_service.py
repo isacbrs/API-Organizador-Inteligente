@@ -3,6 +3,7 @@ from openai import AsyncOpenAI
 from app.core.config import settings
 import tempfile
 import os
+import base64
 
 # O cliente usa a biblioteca da OpenAI, mas aponta para os servidores da Nebius
 client = AsyncOpenAI(
@@ -78,3 +79,57 @@ async def transcrever_e_extrair_audio(audio_bytes: bytes, formato: str) -> dict:
         # Limpeza obrigatória: apaga o ficheiro temporário para não lotar o servidor
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+async def extrair_dados_imagem(imagem_bytes: bytes, formato: str) -> dict:
+    """
+    Converte os bytes da imagem para Base64, envia para o LLM Vision da Nebius
+    e extrai o JSON da fatura.
+    """
+    # Converte os bytes puros para o formato codificado em Base64 que a API exige
+    imagem_b64 = base64.b64encode(imagem_bytes).decode("utf-8")
+    formato_mime = f"image/{formato}" if formato != "jpg" else "image/jpeg"
+    
+    # URL de dados (Data URI) que carrega a imagem na memória da requisição
+    image_url = f"data:{formato_mime};base64,{imagem_b64}"
+
+    system_prompt = """Você é um extrator de dados financeiros visual.
+    Analise a imagem da fatura ou boleto fornecida e extraia os dados solicitados.
+    
+    REGRAS DE SEGURANÇA E NEGÓCIO:
+    1. Ignore e censure dados sensíveis (CPF, CNPJ, código de barras, endereços).
+    2. Determine se o 'tipo' da despesa é: 'mensal', 'parcelado' ou 'unico'.
+    3. Formate a 'data_vencimento' obrigatoriamente no padrão ISO 8601 (YYYY-MM-DD). Assuma que o ano atual é 2026 caso não esteja visível.
+    
+    FORMATO DE SAÍDA OBRIGATÓRIO (Apenas JSON, sem markdown):
+    {
+      "nome": "Nome do Fornecedor ou Serviço (ex: Neoenergia, CAESB, TIM)",
+      "valor": 00.00,
+      "data_vencimento": "YYYY-MM-DD",
+      "tipo": "mensal"
+    }"""
+
+    # Utilizamos o Llama 3.2 Vision (ou o modelo multimodal que o Hackathon da Nebius fornecer)
+    response = await client.chat.completions.create(
+        model="meta-llama/Llama-3.2-11B-Vision-Instruct", 
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Extraia os dados deste boleto/fatura em formato JSON."},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url,
+                            "detail": "high" # Garante resolução suficiente para ler texto pequeno
+                        }
+                    }
+                ]
+            }
+        ],
+        temperature=0.0,
+        response_format={"type": "json_object"}
+    )
+    
+    resultado_texto = response.choices[0].message.content
+    return json.loads(resultado_texto)            
